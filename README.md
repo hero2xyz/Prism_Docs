@@ -394,18 +394,199 @@ PrismSystem->UnregisterGlobalEvaluator(Tag);
 # Working with Contexts and Metadata
 
 ## Introduction
-Contexts in Prism provide a robust way to store and manage state during probability evaluations. One of the key features is the use of `FInstancedStruct` for metadata storage, which allows for type-safe storage of any UStruct-based data.
+The Prism system implements a robust hierarchical context model for managing evaluation data and metadata. It offers thread safety, clear data inheritance, and comprehensive tracking capabilities through parent-child relationships. A key feature of Prism is its use of FInstancedStruct for metadata storage, enabling type-safe handling of any UStruct-based data. This ensures an efficient and secure way to store and manage state during evaluations.
 
-## Context System
+## Context Hierarchy
 
-### Basic Context Creation
-```cpp
-// Create a simple context
-FPrismContext Context = UPrismBlueprintLibrary::CreateContext("Basic Context");
+### Core Components
+- **Unique Identifiers**: Each context has a `OperationId` (GUID)
+- **Relationships**:
+  - Single parent (`ParentId`)
+  - Multiple possible children
+- **Metadata**: Inheritable key-value store
+- **Tracking**: Creation timestamps and reasons
 
-// Create child context that inherits parent metadata
-FPrismContext ChildContext = Context.CreateChildContext("Child Operation");
+### Structure Example
 ```
+BaseContext (OperationId: ABC)
+├── ChildContext1 (ParentId: ABC)
+│   └── GrandchildContext (ParentId: ChildContext1)
+└── ChildContext2 (ParentId: ABC)
+```
+
+## Core Concepts
+
+### Context Creation
+```cpp
+// Create base context
+FPrismContext BaseContext = UPrismBlueprintLibrary::CreateContext("InitialRequest");
+
+// Add initial metadata
+UPrismBlueprintLibrary::SetContextFloat(BaseContext, "BaseValue", 0.75f);
+FPrismContextTracker::Get().RegisterContext(BaseContext);
+```
+
+### Child Context Management
+```cpp
+// Create and configure child
+FPrismContext ChildContext = CreateChildContext(ParentContext, "EvaluationPhase1");
+UPrismBlueprintLibrary::SetContextFloat(ChildContext, "CalculatedValue", newValue);
+
+// Register after configuration
+FPrismContextTracker::Get().RegisterContext(ChildContext);
+```
+
+## Implementation Guide
+
+### Evaluator Implementation
+```cpp
+FPrismOperationResult Evaluate_Implementation(float InProbability, 
+    float& OutProbability, 
+    const FPrismContext& Context)
+{
+    // Create evaluation context
+    FPrismContext EvalContext = CreateChildContext(Context, "ProbabilityEvaluation");
+    
+    // Perform calculations
+    float ModifiedProbability = CalculateModification(InProbability);
+    
+    // Store results
+    UPrismBlueprintLibrary::SetContextFloat(EvalContext, "ModifiedValue", ModifiedProbability);
+    FPrismContextTracker::Get().RegisterContext(EvalContext);
+    
+    OutProbability = ModifiedProbability;
+    return FPrismOperationResult::Success();
+}
+```
+
+### Accessing Results
+```cpp
+// Perform evaluation
+FPrismEvaluation Result = PrismSubsystem->EvaluateWithContext(Probability, BaseContext);
+
+// Retrieve results
+float ModifiedValue;
+bool bSuccess = UPrismBlueprintLibrary::GetContextFloat(
+    Result.Context, 
+    "ModifiedValue", 
+    ModifiedValue
+);
+```
+
+## Best Practices
+
+### Context Creation Rules
+1. **Complete Configuration Before Registration**
+   ```cpp
+   FPrismContext Context = CreateChildContext(Parent, "Reason");
+   SetupAllMetadata(Context);  // Configure everything first
+   RegisterContext(Context);   // Register only when ready
+   ```
+
+2. **Descriptive Reason Strings**
+   ```cpp
+   // Good
+   CreateChildContext(Parent, "CalculatingSpawnProbability");
+   
+   // Bad
+   CreateChildContext(Parent, "Update");  // Too vague
+   ```
+
+3. **Metadata Management**
+   ```cpp
+   // Batch updates for efficiency
+   TMap<FName, FInstancedStruct> BatchData = PrepareMetadata();
+   UPrismBlueprintLibrary::SetOrUpdateMetadata(Context, BatchData, true);
+   ```
+
+### Common Pitfalls to Avoid
+```cpp
+// ❌ WRONG: Premature registration
+FPrismContext Context = CreateChildContext(Parent, "Reason");
+RegisterContext(Context);  // Too early!
+SetupMetadata(Context);   // Data might be missed by other systems
+
+// ✅ CORRECT: Complete setup before registration
+FPrismContext Context = CreateChildContext(Parent, "Reason");
+SetupMetadata(Context);   // Configure first
+RegisterContext(Context); // Register when ready
+```
+
+## Advanced Features
+
+### Context Searching
+```cpp
+FContextSearchCriteria Criteria;
+Criteria.MinAge = 0.0f;
+Criteria.MaxAge = 30.0f;
+Criteria.bMustHaveChildren = true;
+Criteria.RequiredMetadata.Add("Category", CategoryValue);
+
+TArray<FPrismContext> Results = FindContexts(Criteria);
+```
+
+### Hierarchy Navigation
+```cpp
+// Get full ancestry
+TArray<FPrismContext> ParentChain = GetParentChain(ContextId);
+
+// Find root context
+FPrismContext RootContext;
+GetRootContext(ContextId, RootContext);
+
+// Check relationships
+bool bIsAncestor = IsAncestorOf(PotentialAncestorId, ContextId);
+```
+
+## Debugging and Monitoring
+
+### Debug Tools
+```cpp
+// Log hierarchy
+LogContextHierarchy(Context);
+
+// Get debug information
+FString DebugInfo = GetContextDebugString(Context);
+FString HierarchyInfo = GetHierarchyDebugString(Context.OperationId);
+```
+
+### Performance Monitoring
+```cpp
+FPrismTrackerStats Stats = GetStats();
+UE_LOG(LogPrism, Log, TEXT("Active Contexts: %d"), Stats.ActiveContexts);
+UE_LOG(LogPrism, Log, TEXT("Average Age: %.2f"), Stats.AverageContextAge);
+UE_LOG(LogPrism, Log, TEXT("Memory Usage: %zu"), Stats.EstimatedMemoryUsage);
+```
+
+## Performance and Cleanup
+
+### Automatic Cleanup Triggers
+- Exceeding `MaxTrackedContexts`
+- Contexts older than `TrackedContextLifetime`
+- System memory pressure
+
+### Manual Cleanup
+```cpp
+// Clean expired contexts
+FPrismContextTracker::Get().CleanupExpiredContexts(30.0f);
+
+// Emergency cleanup
+FPrismContextTracker::Get().EmergencyCleanup(1000);
+
+// Remove orphaned contexts
+FPrismContextTracker::Get().CleanupOrphanedContexts();
+```
+
+### Performance Optimization
+- Use batch metadata updates when possible
+- Clean up old contexts regularly
+- Monitor context creation rate
+- Use appropriate search criteria
+
+## Thread Safety Considerations
+- Context registration is thread-safe
+- Metadata operations are atomic
+- Child context creation is thread-safe
 
 ### Working with Metadata
 The context system uses `FInstancedStruct` to store metadata values, providing type-safety and flexibility. Common value types are wrapped in Prism-specific structs:
