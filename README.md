@@ -386,7 +386,7 @@ PrismSystem->UnregisterGlobalEvaluator(Tag);
 ```
 
 ### Best Practices for Global Evaluators
-1. Use clear, hierarchical tags for organization
+1. Use clear, hierarchical tags for organizationfare
 2. Keep evaluators focused on single responsibilities
 3. Consider evaluation order when setting priorities
 4. Use configuration to enable/disable evaluators
@@ -584,9 +584,118 @@ FPrismContextTracker::Get().CleanupOrphanedContexts();
 - Use appropriate search criteria
 
 ## Thread Safety Considerations
-- Context registration is thread-safe
-- Metadata operations are atomic
-- Child context creation is thread-safe
+
+### Protected Operations
+- Context registration/unregistration is thread-safe through `FPrismContextTracker`'s `ContextLock`
+- Context lookup and hierarchy operations are thread-safe
+- Context cleanup operations are thread-safe
+
+### Non-Thread-Safe Operations
+- **Metadata Operations**: Operations on a context's metadata are NOT thread-safe
+  ```cpp
+  // These operations are not thread-safe:
+  Context.SetMetadata("Key", Value);
+  Context.GetMetadata("Key", OutValue);
+  ```
+
+### Thread Safety Implementation Guide
+
+#### For Single-Thread Usage
+```cpp
+// Safe in single-threaded environment
+FPrismContext Context = CreateChildContext(Parent, "Reason");
+SetContextFloat(Context, "Value", 1.0f);
+RegisterContext(Context);
+```
+
+#### For Multi-Thread Usage
+You need to implement your own synchronization:
+
+```cpp
+// Example of user-implemented thread safety
+class FThreadSafeContextWrapper
+{
+    FPrismContext Context;
+    FCriticalSection MetadataLock;
+
+public:
+    template<typename T>
+    void SetMetadataSafe(const FName& Key, const T& Value)
+    {
+        FScopeLock Lock(&MetadataLock);
+        Context.SetMetadata(Key, Value);
+    }
+
+    template<typename T>
+    bool GetMetadataSafe(const FName& Key, T& OutValue)
+    {
+        FScopeLock Lock(&MetadataLock);
+        return Context.GetMetadata(Key, OutValue);
+    }
+};
+```
+
+### Best Practices for Thread Safety
+
+1. **Complete Configuration Before Sharing**
+   ```cpp
+   // Good: Configure everything before making context available to other threads
+   FPrismContext Context = CreateChildContext(Parent, "Reason");
+   SetupAllMetadata(Context);  // Do all metadata operations while single-threaded
+   RegisterContext(Context);   // Only then make it available to other threads
+   ```
+
+2. **Avoid Concurrent Metadata Modifications**
+   ```cpp
+   // Bad: Potential race conditions
+   void ThreadFunc1() { Context.SetMetadata("Key1", Value1); }
+   void ThreadFunc2() { Context.SetMetadata("Key2", Value2); }
+
+   // Good: Use synchronization if needed
+   FCriticalSection ContextLock;
+   void ThreadFunc1()
+   {
+       FScopeLock Lock(&ContextLock);
+       Context.SetMetadata("Key1", Value1);
+   }
+   ```
+
+3. **Read-Only After Registration**
+   - Treat contexts as immutable after registration when possible
+   - If modifications are needed, implement proper synchronization
+
+### System Design Considerations
+
+1. **Context Lifecycle**
+   ```cpp
+   // Recommended pattern:
+   // 1. Create context (single thread)
+   FPrismContext Context = CreateChildContext(Parent, "Reason");
+   
+   // 2. Configure metadata (single thread)
+   SetupMetadata(Context);
+   
+   // 3. Register (thread-safe operation)
+   RegisterContext(Context);
+   
+   // 4. After this point, treat context as read-only
+   // Or implement proper synchronization for modifications
+   ```
+
+2. **Batch Operations**
+   ```cpp
+   // Prepare all data before touching the context
+   TMap<FName, FInstancedStruct> BatchData = PrepareMetadata();
+   
+   // Minimize time spent modifying the context
+   FScopeLock Lock(&YourContextLock);
+   UPrismBlueprintLibrary::SetOrUpdateMetadata(Context, BatchData, true);
+   ```
+
+3. **Performance Implications**
+   - Adding synchronization can impact performance
+   - Consider using lock-free structures for high-performance requirements
+   - Batch operations when possible to minimize lock contention
 
 ### Working with Metadata
 The context system uses `FInstancedStruct` to store metadata values, providing type-safety and flexibility. Common value types are wrapped in Prism-specific structs:
